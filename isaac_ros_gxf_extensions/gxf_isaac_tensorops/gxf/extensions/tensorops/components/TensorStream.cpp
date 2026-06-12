@@ -86,7 +86,9 @@ gxf_result_t TensorStream::initialize() {
   auto err_code = cvcore::tensor_ops::TensorContextFactory::CreateContext(
       context_, backend_type.value());
   if (err_code != cvcore::tensor_ops::make_error_code(cvcore::tensor_ops::ErrorCode::SUCCESS)) {
-    GXF_LOG_ERROR("tensor context creation failed.");
+    GXF_LOG_ERROR(
+      "tensor context creation failed for backend_type='%s': error=%d (%s).",
+      backend_type_.get().c_str(), err_code.value(), err_code.message().c_str());
     return GXF_FAILURE;
   }
   // Construct stream
@@ -101,7 +103,10 @@ gxf_result_t TensorStream::initialize() {
   }
   err_code = context_->CreateStream(stream_, engine_type.value());
   if (err_code != cvcore::tensor_ops::make_error_code(cvcore::tensor_ops::ErrorCode::SUCCESS)) {
-    GXF_LOG_ERROR("tensor stream creation failed.");
+    GXF_LOG_ERROR(
+      "tensor stream creation failed for backend_type='%s', engine_type='%s': error=%d (%s).",
+      backend_type_.get().c_str(), engine_type_.get().c_str(), err_code.value(),
+      err_code.message().c_str());
     return GXF_FAILURE;
   }
   return GXF_SUCCESS;

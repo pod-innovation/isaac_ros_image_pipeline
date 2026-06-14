@@ -101,28 +101,33 @@ set_target_properties(crop_node PROPERTIES
   BUILD_RPATH_USE_ORIGIN TRUE
   INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-# pad_node
-ament_auto_add_library(pad_node SHARED src/pad_node.cpp)
-rclcpp_components_register_nodes(pad_node "nvidia::isaac_ros::image_proc::PadNode")
-target_link_libraries(pad_node cvcuda nvcv_types)
-set(node_plugins "${node_plugins}nvidia::isaac_ros::image_proc::PadNode;$<TARGET_FILE:pad_node>\n")
+find_path(NVCV_INCLUDE_DIR nvcv/Tensor.hpp)
+if(NVCV_INCLUDE_DIR)
+  # pad_node
+  ament_auto_add_library(pad_node SHARED src/pad_node.cpp)
+  rclcpp_components_register_nodes(pad_node "nvidia::isaac_ros::image_proc::PadNode")
+  target_link_libraries(pad_node cvcuda nvcv_types)
+  set(node_plugins "${node_plugins}nvidia::isaac_ros::image_proc::PadNode;$<TARGET_FILE:pad_node>\n")
 
-# image_normalize_node
-ament_auto_add_library(image_normalize_node SHARED src/image_normalize_node.cpp)
-  rclcpp_components_register_nodes(image_normalize_node
-    "nvidia::isaac_ros::image_proc::ImageNormalizeNode")
-  set(node_plugins
-    "${node_plugins}nvidia::isaac_ros::image_proc::ImageNormalizeNode;$<TARGET_FILE:image_normalize_node>\n")
-  target_link_libraries(image_normalize_node cvcuda nvcv_types)
-  set_target_properties(image_normalize_node PROPERTIES
+  # image_normalize_node
+  ament_auto_add_library(image_normalize_node SHARED src/image_normalize_node.cpp)
+    rclcpp_components_register_nodes(image_normalize_node
+      "nvidia::isaac_ros::image_proc::ImageNormalizeNode")
+    set(node_plugins
+      "${node_plugins}nvidia::isaac_ros::image_proc::ImageNormalizeNode;$<TARGET_FILE:image_normalize_node>\n")
+    target_link_libraries(image_normalize_node cvcuda nvcv_types)
+    set_target_properties(image_normalize_node PROPERTIES
+      BUILD_WITH_INSTALL_RPATH TRUE
+      BUILD_RPATH_USE_ORIGIN TRUE
+      INSTALL_RPATH_USE_LINK_PATH TRUE)
+
+  set_target_properties(pad_node PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE
     BUILD_RPATH_USE_ORIGIN TRUE
     INSTALL_RPATH_USE_LINK_PATH TRUE)
-
-set_target_properties(pad_node PROPERTIES
-  BUILD_WITH_INSTALL_RPATH TRUE
-  BUILD_RPATH_USE_ORIGIN TRUE
-  INSTALL_RPATH_USE_LINK_PATH TRUE)
+else()
+  message(WARNING "CV-CUDA/NVCV headers not found; skipping PadNode and ImageNormalizeNode")
+endif()
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

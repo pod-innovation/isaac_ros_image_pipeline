@@ -55,6 +55,8 @@ private:
   int16_t vertical_interval_;
   std::string interpolation_;
   std::string border_type_;
+  std::string engine_type_;
+  std::string encoding_desired_;
 };
 
 }  // namespace image_proc

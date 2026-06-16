@@ -17,10 +17,13 @@
 
 #include "isaac_ros_image_proc/rectify_node.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 #include "isaac_ros_common/qos.hpp"
@@ -30,6 +33,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp_components/register_node_macro.hpp"
+#include "sensor_msgs/image_encodings.hpp"
 
 namespace nvidia
 {
@@ -58,6 +62,7 @@ constexpr char OUTPUT_CAM_TOPIC_NAME[] = "camera_info_rect";
 
 constexpr char APP_YAML_FILENAME[] = "config/nitros_rectify_node.yaml";
 constexpr char PACKAGE_NAME[] = "isaac_ros_image_proc";
+constexpr uint64_t MIN_RECTIFY_BLOCK_SIZE = 7372800;
 
 const std::vector<std::pair<std::string, std::string>> EXTENSIONS = {
   {"isaac_ros_gxf", "gxf/lib/std/libgxf_std.so"},
@@ -76,6 +81,52 @@ const std::map<gxf::optimizer::ComponentKey, std::string> COMPATIBLE_DATA_FORMAT
   {INPUT_COMPONENT_KEY, INPUT_DEFAULT_TENSOR_FORMAT},
   {OUTPUT_COMPONENT_KEY, OUTPUT_DEFAULT_TENSOR_FORMAT}
 };
+const std::array<std::string, 4> RECTIFY_SUPPORTED_IMAGE_FORMATS = {
+  nitros::nitros_image_bgr8_t::supported_type_name,
+  nitros::nitros_image_rgb8_t::supported_type_name,
+  nitros::nitros_image_nv12_t::supported_type_name,
+  nitros::nitros_image_nv24_t::supported_type_name,
+};
+
+GraphIOGroupSupportedDataTypesInfoList GetRectifyIOGroupInfoList()
+{
+  const gxf::optimizer::ComponentInfo image_input = {
+    "nvidia::gxf::DoubleBufferReceiver",
+    "image_in",
+    "sync"
+  };
+  const gxf::optimizer::ComponentInfo camera_info_input = {
+    "nvidia::gxf::DoubleBufferReceiver",
+    "camera_info_in",
+    "sync"
+  };
+  const gxf::optimizer::ComponentInfo image_output = {
+    "nvidia::isaac_ros::MessageRelay",
+    "sink",
+    "image_sink"
+  };
+  const gxf::optimizer::ComponentInfo camera_info_output = {
+    "nvidia::isaac_ros::MessageRelay",
+    "sink",
+    "camera_info_sink"
+  };
+
+  gxf::optimizer::GraphIOGroupSupportedDataTypesInfo io_group;
+  io_group.ingress_infos = {image_input, camera_info_input};
+  io_group.egress_infos = {image_output, camera_info_output};
+
+  for (const std::string & image_format : RECTIFY_SUPPORTED_IMAGE_FORMATS) {
+    io_group.supported_data_types.push_back({
+      {INPUT_COMPONENT_KEY, image_format},
+      {INPUT_CAM_COMPONENT_KEY, INPUT_DEFAULT_CAM_INFO_FORMAT},
+      {OUTPUT_COMPONENT_KEY, image_format},
+      {OUTPUT_CAM_COMPONENT_KEY, OUTPUT_DEFAULT_CAM_INFO_FORMAT},
+    });
+  }
+
+  return {io_group};
+}
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wpedantic"
 const nitros::NitrosPublisherSubscriberConfigMap CONFIG_MAP = {
@@ -116,9 +167,18 @@ const nitros::NitrosPublisherSubscriberConfigMap CONFIG_MAP = {
 };
 #pragma GCC diagnostic pop
 
+namespace img_encodings = sensor_msgs::image_encodings;
+const std::unordered_map<std::string, std::string> ROS_2_NITROS_FORMAT_MAP({
+        {img_encodings::RGB8, nitros::nitros_image_rgb8_t::supported_type_name},
+        {img_encodings::BGR8, nitros::nitros_image_bgr8_t::supported_type_name},
+        {img_encodings::NV24, nitros::nitros_image_nv24_t::supported_type_name},
+        {"nv12", nitros::nitros_image_nv12_t::supported_type_name},
+      });
+
 RectifyNode::RectifyNode(const rclcpp::NodeOptions & options)
 : nitros::NitrosNode(options,
     APP_YAML_FILENAME,
+    GetRectifyIOGroupInfoList(),
     CONFIG_MAP,
     PRESET_EXTENSION_SPEC_NAMES,
     EXTENSION_SPEC_FILENAMES,
@@ -131,7 +191,9 @@ RectifyNode::RectifyNode(const rclcpp::NodeOptions & options)
   horizontal_interval_(declare_parameter<int16_t>("horizontal_interval", 1)),
   vertical_interval_(declare_parameter<int16_t>("vertical_interval", 1)),
   interpolation_(declare_parameter<std::string>("interpolation", "cubic_catmullrom")),
-  border_type_(declare_parameter<std::string>("border_type", "zero"))
+  border_type_(declare_parameter<std::string>("border_type", "zero")),
+  engine_type_(declare_parameter<std::string>("engine_type", "GPU")),
+  encoding_desired_(declare_parameter<std::string>("encoding_desired", ""))
 {
   RCLCPP_DEBUG(get_logger(), "[RectifyNode] Constructor");
 
@@ -148,6 +210,25 @@ RectifyNode::RectifyNode(const rclcpp::NodeOptions & options)
     } else {
       config.second.qos = output_qos_;
     }
+  }
+
+  if (!encoding_desired_.empty()) {
+    auto nitros_format = ROS_2_NITROS_FORMAT_MAP.find(encoding_desired_);
+    if (nitros_format == std::end(ROS_2_NITROS_FORMAT_MAP)) {
+      RCLCPP_ERROR(
+        get_logger(), "[RectifyNode] Unsupported encoding[%s]", encoding_desired_.c_str());
+      throw std::invalid_argument("[RectifyNode] Unsupported encoding.");
+    }
+
+    config_map_[INPUT_COMPONENT_KEY].compatible_data_format = nitros_format->second;
+    config_map_[INPUT_COMPONENT_KEY].use_compatible_format_only = true;
+    config_map_[OUTPUT_COMPONENT_KEY].compatible_data_format = nitros_format->second;
+    config_map_[OUTPUT_COMPONENT_KEY].use_compatible_format_only = true;
+
+    RCLCPP_INFO(
+      get_logger(),
+      "[RectifyNode] Set input/output data format to: \"%s\"",
+      nitros_format->second.c_str());
   }
 
   registerSupportedType<nvidia::isaac_ros::nitros::NitrosCameraInfo>();
@@ -200,13 +281,20 @@ void RectifyNode::preLoadGraphCallback()
     "border_type",
     border_type_);
 
+  NitrosNode::preLoadGraphSetParameter(
+    "resource",
+    "nvidia::isaac::tensor_ops::TensorStream",
+    "engine_type",
+    engine_type_);
+
   RCLCPP_INFO(
     get_logger(),
     "[RectifyNode] preLoadGraphCallback() with image (%s x %s)."
     "[RectifyNode] preLoadGraphCallback() with interval (%s x %s)."
-    "[RectifyNode] preLoadGraphCallback() with interpolation %s and border type %s.",
+    "[RectifyNode] preLoadGraphCallback() with interpolation %s, border type %s, "
+    "and engine %s.",
     w.c_str(), h.c_str(), hz_interval.c_str(), vt_interval.c_str(),
-    interpolation_.c_str(), border_type_.c_str());
+    interpolation_.c_str(), border_type_.c_str(), engine_type_.c_str());
 }
 
 void RectifyNode::postLoadGraphCallback()
@@ -221,7 +309,9 @@ void RectifyNode::postLoadGraphCallback()
     "image_sink"                        // entity_name
   };
   std::string image_format = getFinalDataFormat(component);
-  uint64_t block_size = calculate_image_size(image_format, output_width_, output_height_);
+  uint64_t block_size = std::max(
+    calculate_image_size(image_format, output_width_, output_height_),
+    MIN_RECTIFY_BLOCK_SIZE);
   RCLCPP_DEBUG(
     get_logger(),
     "[RectifyNode] postLoadGraphCallback() block_size = %ld.",

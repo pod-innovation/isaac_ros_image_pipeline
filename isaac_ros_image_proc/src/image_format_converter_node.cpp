@@ -17,9 +17,11 @@
 
 #include "isaac_ros_image_proc/image_format_converter_node.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 #include "isaac_ros_common/qos.hpp"
@@ -49,6 +51,7 @@ constexpr char OUTPUT_TOPIC_NAME[] = "image";
 
 constexpr char APP_YAML_FILENAME[] = "config/nitros_image_format_converter_node.yaml";
 constexpr char PACKAGE_NAME[] = "isaac_ros_image_proc";
+constexpr int16_t MIN_CONVERTER_IMAGE_HEIGHT = 800;
 
 const std::vector<std::pair<std::string, std::string>> EXTENSIONS = {
   {"isaac_ros_gxf", "gxf/lib/std/libgxf_std.so"},
@@ -105,6 +108,15 @@ const std::unordered_map<std::string, std::string> ROS_2_NITROS_FORMAT_MAP({
         {img_encodings::NV24, nitros::nitros_image_nv24_t::supported_type_name},
         {"nv12", nitros::nitros_image_nv12_t::supported_type_name},
       });
+const std::unordered_map<std::string, std::string> ROS_2_TENSOROPS_FORMAT_MAP({
+        {img_encodings::RGB8, "RGB_U8"},
+        {img_encodings::RGBA8, "RGBA_U8"},
+        {img_encodings::BGR8, "BGR_U8"},
+        {img_encodings::BGRA8, "BGRA_U8"},
+        {img_encodings::MONO8, "Y_U8"},
+        {img_encodings::NV24, "NV24"},
+        {"nv12", "NV12"},
+      });
 
 ImageFormatConverterNode::ImageFormatConverterNode(const rclcpp::NodeOptions & options)
 : nitros::NitrosNode(options,
@@ -115,7 +127,9 @@ ImageFormatConverterNode::ImageFormatConverterNode(const rclcpp::NodeOptions & o
     GENERATOR_RULE_FILENAMES,
     EXTENSIONS,
     PACKAGE_NAME),
+  encoding_in_(declare_parameter<std::string>("encoding_in", "")),
   encoding_desired_(declare_parameter<std::string>("encoding_desired", "")),
+  engine_type_(declare_parameter<std::string>("engine_type", "GPU")),
   image_width_(declare_parameter<int16_t>("image_width", 1280)),
   image_height_(declare_parameter<int16_t>("image_height", 720)),
   num_blocks_(declare_parameter<int64_t>("num_blocks", 40))
@@ -133,6 +147,23 @@ ImageFormatConverterNode::ImageFormatConverterNode(const rclcpp::NodeOptions & o
     } else {
       config.second.qos = output_qos_;
     }
+  }
+  if (!encoding_in_.empty()) {
+    auto nitros_format = ROS_2_NITROS_FORMAT_MAP.find(encoding_in_);
+    if (nitros_format == std::end(ROS_2_NITROS_FORMAT_MAP)) {
+      RCLCPP_ERROR(
+        get_logger(), "[ImageFormatConverterNode] Unsupported input encoding[%s]",
+        encoding_in_.c_str());
+      throw std::invalid_argument("[ImageFormatConverterNode] Unsupported input encoding.");
+    }
+
+    config_map_[INPUT_COMPONENT_KEY].compatible_data_format = nitros_format->second;
+    config_map_[INPUT_COMPONENT_KEY].use_compatible_format_only = true;
+
+    RCLCPP_INFO(
+      get_logger(),
+      "[ImageFormatConverterNode] Set input data format to: \"%s\"",
+      nitros_format->second.c_str());
   }
   if (!encoding_desired_.empty()) {
     auto nitros_format = ROS_2_NITROS_FORMAT_MAP.find(encoding_desired_);
@@ -158,6 +189,39 @@ ImageFormatConverterNode::ImageFormatConverterNode(const rclcpp::NodeOptions & o
   startNitrosNode();
 }
 
+void ImageFormatConverterNode::preLoadGraphCallback()
+{
+  RCLCPP_INFO(get_logger(), "[ImageFormatConverterNode] preLoadGraphCallback().");
+
+  if (!encoding_desired_.empty()) {
+    auto tensorops_format = ROS_2_TENSOROPS_FORMAT_MAP.find(encoding_desired_);
+    if (tensorops_format == std::end(ROS_2_TENSOROPS_FORMAT_MAP)) {
+      RCLCPP_ERROR(
+        get_logger(), "[ImageFormatConverterNode] Unsupported encoding[%s]",
+        encoding_desired_.c_str());
+      throw std::invalid_argument("[ImageFormatConverterNode] Unsupported encoding.");
+    }
+
+    NitrosNode::preLoadGraphSetParameter(
+      "imageConverter",
+      "nvidia::isaac::tensor_ops::StreamConvertColorFormat",
+      "output_type",
+      tensorops_format->second);
+  }
+
+  NitrosNode::preLoadGraphSetParameter(
+    "resource",
+    "nvidia::isaac::tensor_ops::TensorStream",
+    "engine_type",
+    engine_type_);
+
+  RCLCPP_INFO(
+    get_logger(),
+    "[ImageFormatConverterNode] preLoadGraphCallback() with input encoding %s, "
+    "output encoding %s, and engine %s.",
+    encoding_in_.c_str(), encoding_desired_.c_str(), engine_type_.c_str());
+}
+
 void ImageFormatConverterNode::postLoadGraphCallback()
 {
   RCLCPP_INFO(get_logger(), "[ImageFormatConverterNode] postLoadGraphCallback().");
@@ -168,7 +232,10 @@ void ImageFormatConverterNode::postLoadGraphCallback()
     "sink"                        // entity_name
   };
   std::string image_format = getFinalDataFormat(component);
-  uint64_t block_size = calculate_image_size(image_format, image_width_, image_height_);
+  uint64_t block_size = calculate_image_size(
+    image_format,
+    image_width_,
+    std::max(image_height_, MIN_CONVERTER_IMAGE_HEIGHT));
   RCLCPP_DEBUG(
     get_logger(),
     "[ImageFormatConverterNode] postLoadGraphCallback() block_size = %ld.",

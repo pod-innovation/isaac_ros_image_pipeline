@@ -42,10 +42,13 @@ public:
   ImageFormatConverterNode & operator=(const ImageFormatConverterNode &) = delete;
 
   // The callback to be implemented by users for any required initialization
+  void preLoadGraphCallback() override;
   void postLoadGraphCallback() override;
 
 private:
+  const std::string encoding_in_;
   const std::string encoding_desired_;
+  const std::string engine_type_;
   int16_t image_width_;
   int16_t image_height_;
   int64_t num_blocks_;
